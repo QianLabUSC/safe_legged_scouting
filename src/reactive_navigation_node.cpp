@@ -273,6 +273,62 @@ private:
     return polygon_list_merged;
   }
 
+  void visualize_determinant_over_envelope() {
+    // Get envelope bounds
+    std::vector<std::vector<double>> workspace = diffeo_params_.get_workspace();
+    if (workspace.empty()) {
+      RCLCPP_WARN(this->get_logger(), "No workspace defined, skipping determinant visualization");
+      return;
+    }
+    
+    // Assuming workspace is a rectangle, get bounds
+    double x_min = workspace[0][0];
+    double x_max = workspace[2][0]; 
+    double y_min = workspace[0][1];
+    double y_max = workspace[2][1];
+    
+    // 10x10 grid over 1x1 area (normalized to envelope bounds)
+    int resolution = 10;
+    double dx = (x_max - x_min) / resolution;
+    double dy = (y_max - y_min) / resolution;
+    
+    // Create CSV file in home directory
+    std::string home_dir = std::getenv("HOME");
+    std::ofstream csv_file(home_dir + "/determinant_visualization.csv");
+    csv_file << "x,y,determinant\n";
+    
+    RCLCPP_INFO(this->get_logger(), "Computing determinant over %dx%d grid", resolution, resolution);
+    
+    for (int i = 0; i < resolution; i++) {
+      for (int j = 0; j < resolution; j++) {
+        double x = x_min + (i + 0.5) * dx;  // Sample at grid center
+        double y = y_min + (j + 0.5) * dy;
+        
+        std::vector<double> position = {x, y};
+        double yaw = 0.0;  // Use 0 yaw for visualization
+        
+        // Compute diffeomorphism transform to get Jacobian
+        DiffeoTransformResult transform_result = computeDiffeoTransform(
+            position, yaw, diffeo_tree_array_, diffeo_params_, this->get_logger());
+        
+        // Compute determinant of Jacobian
+        Eigen::Matrix2d jacobian;
+        jacobian << transform_result.transformed_jacobian[0][0],
+                    transform_result.transformed_jacobian[0][1],
+                    transform_result.transformed_jacobian[1][0],
+                    transform_result.transformed_jacobian[1][1];
+        
+        double determinant = jacobian.determinant();
+        
+        // Write to CSV
+        csv_file << x << "," << y << "," << determinant << "\n";
+      }
+    }
+    
+    csv_file.close();
+    RCLCPP_INFO(this->get_logger(), "Determinant visualization saved to %s/determinant_visualization.csv", home_dir.c_str());
+  }
+
   void obstacles_callback(
       const safe_bayesian_optimization::msg::PolygonArray::SharedPtr msg) {
     RCLCPP_INFO(this->get_logger(), "Received %zu obstacle polygons",
@@ -405,6 +461,10 @@ private:
 
     // Publish clipped polygon markers for visualization
     publish_clipped_polygon_markers(clipped_polygons);
+    
+    // Visualize determinant over envelope at 10x10 resolution
+    visualize_determinant_over_envelope();
+    
     RCLCPP_INFO(this->get_logger(),
                 "Done converting merged polygon to diffeomorphism tree");
 
