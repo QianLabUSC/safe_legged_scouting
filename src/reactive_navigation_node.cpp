@@ -307,18 +307,17 @@ private:
         std::vector<double> position = {x, y};
         double yaw = 0.0;  // Use 0 yaw for visualization
         
-        // Compute diffeomorphism transform to get Jacobian
+        // Compute diffeomorphism transform
         DiffeoTransformResult transform_result = computeDiffeoTransform(
             position, yaw, diffeo_tree_array_, diffeo_params_, this->get_logger());
         
-        // Compute determinant of Jacobian
-        Eigen::Matrix2d jacobian;
-        jacobian << transform_result.transformed_jacobian[0][0],
-                    transform_result.transformed_jacobian[0][1],
-                    transform_result.transformed_jacobian[1][0],
-                    transform_result.transformed_jacobian[1][1];
+        // Compute determinant of transformation matrix
+        Eigen::Matrix3d transform_matrix;
+        transform_matrix << transform_result.transformed[0][0], transform_result.transformed[0][1], transform_result.transformed[0][2],
+                           transform_result.transformed[1][0], transform_result.transformed[1][1], transform_result.transformed[1][2],
+                           transform_result.transformed[2][0], transform_result.transformed[2][1], transform_result.transformed[2][2];
         
-        double determinant = jacobian.determinant();
+        double determinant = transform_matrix.determinant();
         
         // Write to CSV
         csv_file << x << "," << y << "," << determinant << "\n";
