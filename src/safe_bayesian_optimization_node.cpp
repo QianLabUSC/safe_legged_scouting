@@ -61,7 +61,7 @@ public:
     this->declare_parameter("opt.update_on_measurement", false);
     this->declare_parameter("opt.expansion_score_k", 1.0);
     this->declare_parameter("opt.goal_score_k", 1.0);
-    this->declare_parameter("opt.use_pareto_selection", false);
+    this->declare_parameter("opt.selection_strategy", std::string("max"));
     this->declare_parameter("robot.radius", 0.5);
     this->declare_parameter("robot.pose_topic", "spirit/current_pose");
     this->declare_parameter("polygon.simplification_tolerance", 0.1);
@@ -88,7 +88,13 @@ public:
     update_on_measurement_ = this->get_parameter("opt.update_on_measurement").as_bool();
     expansion_score_k_ = this->get_parameter("opt.expansion_score_k").as_double();
     goal_score_k_ = this->get_parameter("opt.goal_score_k").as_double();
-    use_pareto_selection_ = this->get_parameter("opt.use_pareto_selection").as_bool();
+    selection_strategy_ = this->get_parameter("opt.selection_strategy").as_string();
+    if (selection_strategy_ != "max" && selection_strategy_ != "alternating_preference") {
+      RCLCPP_WARN(this->get_logger(),
+                  "Unknown opt.selection_strategy '%s'; defaulting to 'max'",
+                  selection_strategy_.c_str());
+      selection_strategy_ = "max";
+    }
     robot_radius_ = this->get_parameter("robot.radius").as_double();
     auto robot_pose_topic =
         this->get_parameter("robot.pose_topic").as_string();
@@ -207,7 +213,7 @@ private:
   double lipschitz_L_;
   double subgoal_erosion_;
   bool update_on_measurement_;
-  bool use_pareto_selection_;
+  std::string selection_strategy_;
   double expansion_score_k_;
   double goal_score_k_;
   double robot_radius_;
@@ -806,65 +812,64 @@ private:
       candidates.push_back(candidate);
     }
 
-    const char *selection_strategy =
-        use_pareto_selection_ ? "pareto_preference" : "max_overall";
     const CandidateScore *best = nullptr;
     double best_metric = -std::numeric_limits<double>::infinity();
     auto pareto_end = pareto_start;
     auto preference_start = pareto_start;
     auto preference_end = pareto_start;
 
-    if (use_pareto_selection_) {
-      if (goal_received_) {
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const CandidateScore &a, const CandidateScore &b) {
-                    if (a.goal_score != b.goal_score) {
-                      return a.goal_score > b.goal_score;
-                    }
-                    return a.expansion_score > b.expansion_score;
-                  });
-      } else {
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const CandidateScore &a, const CandidateScore &b) {
-                    return a.expansion_score > b.expansion_score;
-                  });
+    // --- Shared: Build Pareto front over (goal_score, prob_expansion) ---
+    if (goal_received_) {
+      std::sort(candidates.begin(), candidates.end(),
+                [](const CandidateScore &a, const CandidateScore &b) {
+                  if (a.goal_score != b.goal_score) {
+                    return a.goal_score > b.goal_score;
+                  }
+                  return a.prob_expansion > b.prob_expansion;
+                });
+    } else {
+      std::sort(candidates.begin(), candidates.end(),
+                [](const CandidateScore &a, const CandidateScore &b) {
+                  return a.prob_expansion > b.prob_expansion;
+                });
+    }
+
+    std::map<double, CandidateScore> frontier_2d;
+
+    for (const auto &candidate : candidates) {
+      double key =
+          goal_received_ ? candidate.goal_score : candidate.prob_expansion;
+      auto it = frontier_2d.lower_bound(key);
+      if (it != frontier_2d.end() &&
+          it->second.prob_expansion >= candidate.prob_expansion) {
+        continue;
       }
 
-      std::map<double, CandidateScore> frontier_2d;
-
-      for (const auto &candidate : candidates) {
-        // Use goal_score as key if goal exists, otherwise use expansion_score.
-        double key =
-            goal_received_ ? candidate.goal_score : candidate.expansion_score;
-        auto it = frontier_2d.lower_bound(key);
-        if (it != frontier_2d.end() &&
-            it->second.expansion_score >= candidate.expansion_score) {
-          continue;
+      while (it != frontier_2d.begin()) {
+        auto prev = std::prev(it);
+        if (prev->second.prob_expansion <= candidate.prob_expansion) {
+          frontier_2d.erase(prev);
+        } else {
+          break;
         }
-
-        while (it != frontier_2d.begin()) {
-          auto prev = std::prev(it);
-          if (prev->second.expansion_score <= candidate.expansion_score) {
-            frontier_2d.erase(prev);
-          } else {
-            break;
-          }
-        }
-
-        if (it != frontier_2d.end() &&
-            it->first == key &&
-            it->second.expansion_score <= candidate.expansion_score) {
-          frontier_2d.erase(it);
-        }
-
-        frontier_2d.emplace(key, candidate);
       }
 
-      if (frontier_2d.empty()) {
-        return candidate_indices.front();
+      if (it != frontier_2d.end() &&
+          it->first == key &&
+          it->second.prob_expansion <= candidate.prob_expansion) {
+        frontier_2d.erase(it);
       }
-      pareto_end = std::chrono::steady_clock::now();
 
+      frontier_2d.emplace(key, candidate);
+    }
+
+    if (frontier_2d.empty()) {
+      return candidate_indices.front();
+    }
+    pareto_end = std::chrono::steady_clock::now();
+
+    // --- Strategy-specific selection from Pareto front ---
+    if (selection_strategy_ == "alternating_preference") {
       PreferenceMetric preference = PreferenceMetric::Expansion;
       const char *preference_name = "expansion";
       if (goal_received_) {
@@ -893,8 +898,9 @@ private:
             (preference_index_ + 1) % preference_order_.size();
       }
       RCLCPP_INFO(this->get_logger(),
-                  "Selecting subgoal using strategy: %s, preference: %s",
-                  selection_strategy, preference_name);
+                  "Selecting subgoal using strategy: alternating_preference, "
+                  "preference: %s",
+                  preference_name);
 
       preference_start = std::chrono::steady_clock::now();
       for (const auto &entry : frontier_2d) {
@@ -908,7 +914,7 @@ private:
           metric_value = candidate.robot_score;
           break;
         case PreferenceMetric::Expansion:
-          metric_value = candidate.expansion_score;
+          metric_value = candidate.prob_expansion;
           break;
         }
 
@@ -919,10 +925,13 @@ private:
       }
       preference_end = std::chrono::steady_clock::now();
     } else {
-      pareto_end = std::chrono::steady_clock::now();
-      preference_start = pareto_end;
-      for (const auto &candidate : candidates) {
-        const double overall_score = candidate.goal_score * candidate.prob_expansion;
+      // "max" strategy: pick Pareto-optimal candidate with highest
+      // overall_score = goal_score * prob_expansion
+      preference_start = std::chrono::steady_clock::now();
+      for (const auto &entry : frontier_2d) {
+        const CandidateScore &candidate = entry.second;
+        const double overall_score =
+            candidate.goal_score * candidate.prob_expansion;
         if (!best || overall_score > best_metric) {
           best = &candidate;
           best_metric = overall_score;
@@ -930,9 +939,10 @@ private:
       }
       preference_end = std::chrono::steady_clock::now();
       RCLCPP_INFO(this->get_logger(),
-                  "Selecting subgoal using strategy: %s (overall_score = "
-                  "goal_score * prob_expansion)",
-                  selection_strategy);
+                  "Selecting subgoal using strategy: max (overall_score = "
+                  "goal_score * prob_expansion, from %zu Pareto-optimal "
+                  "candidates)",
+                  frontier_2d.size());
     }
 
     if (!best) {
