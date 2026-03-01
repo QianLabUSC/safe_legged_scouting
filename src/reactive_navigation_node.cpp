@@ -10,6 +10,7 @@
 #include <boost/geometry/strategies/buffer.hpp>
 #include <cstdlib>
 #include <fstream>
+#include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/polygon.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <iomanip>
@@ -111,7 +112,7 @@ public:
                   std::placeholders::_1));
 
     // Subscribe to goal point (used in naive mode)
-    goal_point_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
+    goal_point_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
         "goal_point", 10,
         std::bind(&ReactiveNavigationNode::goal_point_callback, this,
                   std::placeholders::_1));
@@ -186,7 +187,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Polygon>::SharedPtr envelope_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr pose_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr subgoal_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr goal_point_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr subgoal_reached_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
@@ -519,8 +520,8 @@ private:
                 current_subgoal_.x, current_subgoal_.y, current_subgoal_.z);
   }
 
-  void goal_point_callback(const geometry_msgs::msg::Point::SharedPtr msg) {
-    goal_point_ = *msg;
+  void goal_point_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
+    goal_point_ = msg->point;
     has_goal_point_ = true;
     RCLCPP_INFO(this->get_logger(), "Received goal point: x=%.3f, y=%.3f",
                 goal_point_.x, goal_point_.y);
